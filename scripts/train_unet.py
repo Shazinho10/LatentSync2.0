@@ -39,7 +39,6 @@ from accelerate.utils import set_seed
 from latentsync.data.unet_dataset import UNetDataset
 
 from latentsync.models.unet import UNet3DConditionModel
-from latentsync.models.mel_unet import MelUnet
 from latentsync.models.stable_syncnet import StableSyncNet
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from latentsync.utils.util import (
@@ -124,7 +123,6 @@ def main(config):
         num_frames=config.data.num_frames,
         audio_feat_length=config.data.audio_feat_length,
     )
-    mel_unet = MelUnet() # mel unet added here
     unet, resume_global_step = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         config.ckpt.resume_ckpt_path,
