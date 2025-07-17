@@ -50,3 +50,5 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
+
+*test*

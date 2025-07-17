@@ -61,7 +61,7 @@ def main(config, args):
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
-        device="cpu",
+        device="cuda",
     )
 
     unet = unet.to(dtype=dtype)
