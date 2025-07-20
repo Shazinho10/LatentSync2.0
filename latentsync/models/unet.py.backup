@@ -1,103 +1,34 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+# Adapted from https://github.com/guoyww/AnimateDiff/blob/main/animatediff/models/unet.py
+
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+import copy
+from .mel_unet import MelUnet
+import torch
+import torch.nn as nn
+import torch.utils.checkpoint
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models import ModelMixin
+
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
-
-# Assuming the following files are in the same directory or accessible in the python path
-from .self_attention import SelfAttention  # Make sure this import is correct
 from .unet_blocks import (
     CrossAttnDownBlock3D,
     CrossAttnUpBlock3D,
     DownBlock3D,
     UNetMidBlock3DCrossAttn,
+    UpBlock3D,
     get_down_block,
     get_up_block,
 )
 from .resnet import InflatedConv3d, InflatedGroupNorm
+
 from ..utils.util import zero_rank_log
 from .utils import zero_module
 
 
-logger = logging.get_logger(__name__)
-
-
-# Your MelUnet and ConvBlock classes (place them here or import them)
-class ConvBlock(nn.Module):
-    """A Convolutional Block with Conv -> ReLU -> Conv -> ReLU -> Self-Attention"""
-    def __init__(self, in_channels, out_channels):
-        super(ConvBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.relu = nn.ReLU(inplace=True)
-        # Assuming SelfAttention is defined elsewhere and works with (B, SeqLen, C)
-        # self.self_attention = SelfAttention(out_channels)
-
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-
-        # The self-attention part from your original code is commented out
-        # as it was not fully defined in the provided snippet.
-        # If you have it, you can uncomment the following lines.
-        # B, C, H, W = x.size()
-        # x_flat = x.view(B, C, H * W).permute(0, 2, 1)
-        # x_attended = self.self_attention(x_flat)
-        # x_attended = x_attended.permute(0, 2, 1).view(B, C, H, W)
-        return x # or return x_attended
-
-
-class MelUnet(nn.Module):
-    def __init__(self):
-        super(MelUnet, self).__init__()
-        self.enc1 = ConvBlock(1, 64)
-        self.pool1 = nn.MaxPool2d(2)
-
-        self.enc2 = ConvBlock(64, 128)
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.bottleneck = ConvBlock(128, 256)
-
-        self.up2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.dec2 = ConvBlock(256, 128)
-
-        self.up1 = nn.ConvTranspose2d(128, 64, 2, stride=2) # Adjusted for simplicity
-        self.dec1 = ConvBlock(128, 64)
-
-        self.final_conv = nn.Conv2d(64, 1, 1)
-
-    def forward(self, x):
-        # Encoder
-        enc1 = self.enc1(x)
-        pooled1 = self.pool1(enc1)
-        enc2 = self.enc2(pooled1)
-        pooled2 = self.pool2(enc2)
-
-        # Bottleneck
-        bottleneck = self.bottleneck(pooled2)
-
-        # Decoder
-        up2 = self.up2(bottleneck)
-        # Crude cropping to handle potential size mismatches, a more robust solution
-        # like padding or calculating output_padding in ConvTranspose2d is recommended.
-        if up2.shape[2:] != enc2.shape[2:]:
-             up2 = F.interpolate(up2, size=enc2.shape[2:], mode='bilinear', align_corners=False)
-        dec2 = torch.cat([up2, enc2], dim=1)
-        dec2 = self.dec2(dec2)
-
-        up1 = self.up1(dec2)
-        if up1.shape[2:] != enc1.shape[2:]:
-             up1 = F.interpolate(up1, size=enc1.shape[2:], mode='bilinear', align_corners=False)
-        dec1 = torch.cat([up1, enc1], dim=1)
-        dec1 = self.dec1(dec1)
-
-        output = self.final_conv(dec1)
-        return output
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 @dataclass
@@ -111,7 +42,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        # ... (all the existing arguments)
         sample_size: Optional[int] = None,
         in_channels: int = 4,
         out_channels: int = 4,
@@ -143,13 +73,14 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         upcast_attention: bool = False,
         resnet_time_scale_shift: str = "default",
         use_inflated_groupnorm=False,
+        # Additional
         use_motion_module=False,
         motion_module_resolutions=(1, 2, 4, 8),
         motion_module_mid_block=False,
         motion_module_decoder_only=False,
         motion_module_type=None,
         motion_module_kwargs={},
-        add_audio_layer=False, # We can use this flag to enable our new feature
+        add_audio_layer=False,
     ):
         super().__init__()
 
@@ -158,17 +89,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.use_motion_module = use_motion_module
         self.add_audio_layer = add_audio_layer
 
-        # NEW: Instantiate MelUnet if audio conditioning is enabled
-        if self.add_audio_layer:
-            self.mel_unet = MelUnet()
-            # Optional: Add a projection layer if MelUnet output dimension
-            # doesn't match the required cross_attention_dim
-            mel_output_channels = 1 # As per your MelUnet's final_conv
-            self.audio_projection = nn.Linear(mel_output_channels, cross_attention_dim)
-
-
         self.conv_in = zero_module(InflatedConv3d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1)))
-        # ... (rest of the __init__ method is the same)
+
         # time
         self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
         timestep_input_dim = block_out_channels[0]
@@ -317,8 +239,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.conv_act = nn.SiLU()
 
         self.conv_out = zero_module(InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1))
+        self.mel_unet = MelUnet() # adding the mel unet to the architechture
 
-    # ... (set_attention_slice and _set_gradient_checkpointing methods are unchanged)
     def set_attention_slice(self, slice_size):
         r"""
         Enable sliced attention computation.
@@ -388,41 +310,41 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         if isinstance(module, (CrossAttnDownBlock3D, DownBlock3D, CrossAttnUpBlock3D, UpBlock3D)):
             module.gradient_checkpointing = value
 
-
     def forward(
         self,
         sample: torch.FloatTensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor = None,
-        # NEW: Add audio_mel as an optional input
-        audio_mel: Optional[torch.FloatTensor] = None,
         class_labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        # support controlnet
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[UNet3DConditionOutput, Tuple]:
+        r"""
+        Args:
+            sample (`torch.FloatTensor`): (batch, channel, height, width) noisy inputs tensor
+            timestep (`torch.FloatTensor` or `float` or `int`): (batch) timesteps
+            encoder_hidden_states (`torch.FloatTensor`): (batch, sequence_length, feature_dim) encoder hidden states
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`models.unet_2d_condition.UNet2DConditionOutput`] instead of a plain tuple.
 
-        # NEW: Logic to handle audio input and generate encoder_hidden_states
-        if self.add_audio_layer:
-            if audio_mel is None:
-                raise ValueError("audio_mel must be provided when add_audio_layer is True")
-
-            # 1. Pass the mel spectrogram through your MelUnet
-            audio_features = self.mel_unet(audio_mel) # Expected shape e.g., (B, 1, H, W)
-
-            # 2. Reshape for cross-attention
-            # The expected shape for encoder_hidden_states is (B, seq_len, cross_attention_dim)
-            B, C, H, W = audio_features.shape
-            audio_features = audio_features.view(B, C, H * W)
-            audio_features = audio_features.permute(0, 2, 1) # -> (B, H*W, C)
-
-            # 3. Project to the required dimension
-            encoder_hidden_states = self.audio_projection(audio_features)
-
-
-        # The rest of the forward pass remains largely the same
+        Returns:
+            [`~models.unet_2d_condition.UNet2DConditionOutput`] or `tuple`:
+            [`~models.unet_2d_condition.UNet2DConditionOutput`] if `return_dict` is True, otherwise a `tuple`. When
+            returning a tuple, the first element is the sample tensor.
+        """
+        # By default samples have to be AT least a multiple of the overall upsampling factor.
+        # The overall upsampling factor is equal to 2 ** (# num of upsampling layears).
+        # However, the upsampling interpolation output size can be forced to fit any upsampling size
+        # on the fly if necessary.
+        if encoder_hidden_states is not None and encoder_hidden_states.numel() > 0:
+            encoder_hidden_states = encoder_hidden_states.unsqueeze(1)
+            encoder_hidden_states = self.mel_unet(encoder_hidden_states)
         default_overall_up_factor = 2**self.num_upsamplers
+
+        # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`
         forward_upsample_size = False
         upsample_size = None
 
@@ -430,15 +352,19 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             logger.info("Forward upsample size to force interpolation output size.")
             forward_upsample_size = True
 
+        # prepare attention_mask
         if attention_mask is not None:
             attention_mask = (1 - attention_mask.to(sample.dtype)) * -10000.0
             attention_mask = attention_mask.unsqueeze(1)
 
+        # center input if necessary
         if self.config.center_input_sample:
             sample = 2 * sample - 1.0
 
+        # time
         timesteps = timestep
         if not torch.is_tensor(timesteps):
+            # This would be a good case for the `match` statement (Python 3.10+)
             is_mps = sample.device.type == "mps"
             if isinstance(timestep, float):
                 dtype = torch.float32 if is_mps else torch.float64
@@ -448,8 +374,14 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
 
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timesteps.expand(sample.shape[0])
+
         t_emb = self.time_proj(timesteps)
+
+        # timesteps does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
         t_emb = t_emb.to(dtype=self.dtype)
         emb = self.time_embedding(t_emb)
 
@@ -463,15 +395,16 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
             emb = emb + class_emb
 
+        # pre-process
         sample = self.conv_in(sample)
 
+        # down
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
-                    # Crucially, pass the new encoder_hidden_states here
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                 )
@@ -479,29 +412,37 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 sample, res_samples = downsample_block(
                     hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states
                 )
+
             down_block_res_samples += res_samples
 
+        # support controlnet
+        down_block_res_samples = list(down_block_res_samples)
         if down_block_additional_residuals is not None:
             for i, down_block_additional_residual in enumerate(down_block_additional_residuals):
-                if down_block_additional_residual.dim() == 4:
+                if down_block_additional_residual.dim() == 4:  # boardcast
                     down_block_additional_residual = down_block_additional_residual.unsqueeze(2)
-                down_block_res_samples[i+1] = down_block_res_samples[i+1] + down_block_additional_residual
+                down_block_res_samples[i] = down_block_res_samples[i] + down_block_additional_residual
 
+        # mid
         sample = self.mid_block(
             sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
         )
 
+        # support controlnet
         if mid_block_additional_residual is not None:
-            if mid_block_additional_residual.dim() == 4:
+            if mid_block_additional_residual.dim() == 4:  # boardcast
                 mid_block_additional_residual = mid_block_additional_residual.unsqueeze(2)
             sample = sample + mid_block_additional_residual
 
+        # up
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
 
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
+            # if we have not reached the final block and need to forward the
+            # upsample size, we do it here
             if not is_final_block and forward_upsample_size:
                 upsample_size = down_block_res_samples[-1].shape[2:]
 
@@ -523,6 +464,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                     encoder_hidden_states=encoder_hidden_states,
                 )
 
+        # post-process
         sample = self.conv_norm_out(sample)
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
@@ -532,7 +474,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         return UNet3DConditionOutput(sample=sample)
 
-    # ... (load_state_dict and from_pretrained methods are unchanged)
     def load_state_dict(self, state_dict, strict=True):
         # If the loaded checkpoint's in_channels or out_channels are different from config
         if state_dict["conv_in.weight"].shape[1] != self.config.in_channels:

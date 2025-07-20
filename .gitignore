@@ -50,5 +50,8 @@ wandb/
 !/docs/*
 !/internal/*.png
 .cog/
-
+convert_unet_to_tensorrt.py
+converta.py
+latentsync_tensorrt_converter.py
+tosee.py
 *test*

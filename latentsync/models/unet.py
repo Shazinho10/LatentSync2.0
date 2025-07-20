@@ -339,7 +339,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         # The overall upsampling factor is equal to 2 ** (# num of upsampling layears).
         # However, the upsampling interpolation output size can be forced to fit any upsampling size
         # on the fly if necessary.
-        if encoder_hidden_states:
+        if encoder_hidden_states is not None and encoder_hidden_states.numel() > 0:
             encoder_hidden_states = encoder_hidden_states.unsqueeze(1)
             encoder_hidden_states = self.mel_unet(encoder_hidden_states)
         default_overall_up_factor = 2**self.num_upsamplers

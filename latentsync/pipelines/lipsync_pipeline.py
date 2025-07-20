@@ -435,6 +435,7 @@ class LipsyncPipeline(DiffusionPipeline):
                     unet_input = torch.cat([unet_input, mask_latents, masked_image_latents, ref_latents], dim=1)
 
                     # predict the noise residual
+                    # import pdb; pdb.set_trace()
                     noise_pred = self.unet(unet_input, t, encoder_hidden_states=audio_embeds).sample
 
                     # perform guidance
