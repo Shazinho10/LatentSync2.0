@@ -60,5 +60,6 @@ beta) parameters that modulate the visual feature maps.
 ### Diagram
 Following is the high level diagram of the implementation where a Mel Unet has been introduced which caters to the audio embeddings only with self-attention each of its block.
 
+![latentsync_2](https://github.com/user-attachments/assets/e2713345-3e6a-4531-8d12-e4b935a5de8d)
 
-![alt text](latentsync_2.jpg)
+
