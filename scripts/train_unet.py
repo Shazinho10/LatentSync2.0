@@ -37,6 +37,7 @@ from diffusers.optimization import get_scheduler
 from accelerate.utils import set_seed
 
 from latentsync.data.unet_dataset import UNetDataset
+
 from latentsync.models.unet import UNet3DConditionModel
 from latentsync.models.stable_syncnet import StableSyncNet
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
@@ -122,7 +123,6 @@ def main(config):
         num_frames=config.data.num_frames,
         audio_feat_length=config.data.audio_feat_length,
     )
-
     unet, resume_global_step = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         config.ckpt.resume_ckpt_path,
@@ -274,9 +274,10 @@ def main(config):
                         start_idx = batch["start_idx"][idx]
 
                         with torch.no_grad():
-                            audio_feat = audio_encoder.audio2feat(video_path)
+                            audio_feat = audio_encoder.audio2feat(video_path) # this is where mel_unet will be added (480, 5, 384)
                         audio_embeds = audio_encoder.crop_overlap_audio_window(audio_feat, start_idx)
                         audio_embeds_list.append(audio_embeds)
+
                 except Exception as e:
                     logger.info(f"{type(e).__name__} - {e} - {video_path}")
                     continue

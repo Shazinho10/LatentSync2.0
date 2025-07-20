@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 import copy
-
+from .mel_unet import MelUnet
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
@@ -239,6 +239,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         self.conv_act = nn.SiLU()
 
         self.conv_out = zero_module(InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1))
+        self.mel_unet = MelUnet() # adding the mel unet to the architechture
 
     def set_attention_slice(self, slice_size):
         r"""
@@ -338,6 +339,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         # The overall upsampling factor is equal to 2 ** (# num of upsampling layears).
         # However, the upsampling interpolation output size can be forced to fit any upsampling size
         # on the fly if necessary.
+        if encoder_hidden_states is not None and encoder_hidden_states.numel() > 0:
+            encoder_hidden_states = encoder_hidden_states.unsqueeze(1)
+            encoder_hidden_states = self.mel_unet(encoder_hidden_states)
         default_overall_up_factor = 2**self.num_upsamplers
 
         # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`

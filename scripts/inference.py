@@ -46,14 +46,14 @@ def main(config, args):
         whisper_model_path = "checkpoints/whisper/tiny.pt"
     else:
         raise NotImplementedError("cross_attention_dim must be 768 or 384")
-
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     audio_encoder = Audio2Feature(
         model_path=whisper_model_path,
-        device="cuda",
+        device=device,
         num_frames=config.data.num_frames,
         audio_feat_length=config.data.audio_feat_length,
     )
-
     vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
@@ -61,7 +61,7 @@ def main(config, args):
     unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
-        device="cpu",
+        device=device,
     )
 
     unet = unet.to(dtype=dtype)
@@ -71,7 +71,7 @@ def main(config, args):
         audio_encoder=audio_encoder,
         unet=unet,
         scheduler=scheduler,
-    ).to("cuda")
+    ).to(device)
 
     # use DeepCache
     if args.enable_deepcache:
