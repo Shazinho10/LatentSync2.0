@@ -17,7 +17,6 @@ class ConvBlock(nn.Module):
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
 
-        # Flatten spatial dims for attention: (B, C, H, W) -> (B, H*W, C)
         B, C, H, W = x.size()
         x_flat = x.view(B, C, H * W).permute(0, 2, 1)
         x_attended = self.self_attention(x_flat)
@@ -91,7 +90,6 @@ class MelUnet(nn.Module):
 
 
 def test_fixed_unet(): 
-    # Create input tensor
     dummy_input = torch.randn(480, 5, 384)
     x = dummy_input.unsqueeze(1)  # (480, 1, 5, 384)
     
@@ -108,7 +106,6 @@ def test_fixed_unet():
     print(f"Input shape:  {x.shape}")
     print(f"Output shape: {output.shape}")
     
-    # Remove channel dimension to get back to original format
     output_squeezed = output.squeeze(1)
     print(f"After squeeze: {output_squeezed.shape}")
     
